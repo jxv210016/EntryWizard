@@ -1,74 +1,87 @@
-from flask import Flask, redirect, request, url_for, jsonify
+from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from flask_login import LoginManager, UserMixin, login_user
-import os
-import requests
-from dotenv import load_dotenv
-
-load_dotenv()
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_cors import CORS  # Make sure flask_cors is imported
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///db.sqlite'
+app.config['JWT_SECRET_KEY'] = 'your_jwt_secret'
 
 db = SQLAlchemy(app)
-login_manager = LoginManager(app)
+jwt = JWTManager(app)
 
-class User(UserMixin, db.Model):
+class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    discord_id = db.Column(db.String(100), unique=True, nullable=False)
-    username = db.Column(db.String(100), nullable=False)
-    email = db.Column(db.String(100), nullable=True)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+    password = db.Column(db.String(100))
+    unit_size = db.Column(db.Integer, default=0)
 
-@login_manager.user_loader
-def load_user(user_id):
-    return User.query.get(int(user_id))
+@app.route('/register', methods=['POST'])
+def register():
+    email = request.json.get('email', None)
+    password = request.json.get('password', None)
+    if not email or not password:
+        return jsonify({"msg": "Missing email or password"}), 400
 
-@app.route('/')
-def index():
-    return 'Welcome to the main page!'
+    if User.query.filter_by(email=email).first():
+        return jsonify({"msg": "Email already registered"}), 400
 
-@app.route('/login/discord')
-def discord_login():
-    params = {
-        'client_id': os.getenv('DISCORD_CLIENT_ID'),
-        'redirect_uri': os.getenv('DISCORD_REDIRECT_URI'),
-        'response_type': 'code',
-        'scope': 'identify email'
-    }
-    discord_login_url = 'https://discord.com/api/oauth2/authorize?' + requests.compat.urlencode(params)
-    return redirect(discord_login_url)
+    hashed_password = generate_password_hash(password)
+    new_user = User(email=email, password=hashed_password)
+    db.session.add(new_user)
+    db.session.commit()
 
-@app.route('/login/discord/callback')
-def discord_callback():
-    code = request.args.get('code')
-    if code:
-        data = {
-            'client_id': os.getenv('DISCORD_CLIENT_ID'),
-            'client_secret': os.getenv('DISCORD_CLIENT_SECRET'),
-            'grant_type': 'authorization_code',
-            'code': code,
-            'redirect_uri': os.getenv('DISCORD_REDIRECT_URI')
-        }
-        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-        token_response = requests.post('https://discord.com/api/oauth2/token', data=data, headers=headers)
-        token_response.raise_for_status()
-        access_token = token_response.json().get('access_token')
+    return jsonify({"msg": "User registered successfully"}), 201
 
-        user_response = requests.get('https://discord.com/api/users/@me', headers={'Authorization': f'Bearer {access_token}'})
-        user_response.raise_for_status()
-        user_data = user_response.json()
+@app.route('/login', methods=['POST'])
+def login():
+    email = request.json.get('email', None)
+    password = request.json.get('password', None)
+    user = User.query.filter_by(email=email).first()
+    if not user or not check_password_hash(user.password, password):
+        return jsonify({"msg": "Bad username or password"}), 401
 
-        user = User.query.filter_by(discord_id=user_data['id']).first()
-        if not user:
-            user = User(discord_id=user_data['id'], username=user_data['username'], email=user_data.get('email'))
-            db.session.add(user)
-            db.session.commit()
+    access_token = create_access_token(identity=email)
+    return jsonify(access_token=access_token)
 
-        login_user(user)
-        return redirect(url_for('index'))
-    else:
-        return jsonify({'error': 'Authorization code not provided'}), 400
+@app.route('/unit', methods=['POST'])
+@jwt_required()
+def update_unit():
+    user_email = get_jwt_identity()
+    user = User.query.filter_by(email=user_email).first()
+    new_unit_size = request.json.get('unit_size', None)
+    if new_unit_size is not None:
+        user.unit_size = new_unit_size
+        db.session.commit()
+        return jsonify({"msg": "Unit size updated"}), 200
+    return jsonify({"msg": "No new unit size provided"}), 400
+
+@app.route('/toggle_task', methods=['POST'])
+@jwt_required()
+def toggle_task():
+    user_email = get_jwt_identity()
+    user = User.query.filter_by(email=user_email).first()
+    # This should actually toggle the task in your application logic
+    user.task_running = not user.task_running  # Assuming you have a task_running column
+    db.session.commit()
+    return jsonify({"new_status": user.task_running}), 200
+
+@app.route('/get_unit_size', methods=['GET'])
+@jwt_required()
+def get_unit_size():
+    user_email = get_jwt_identity()
+    user = User.query.filter_by(email=user_email).first()
+    return jsonify({"unit_size": user.unit_size}), 200
+
+@app.route('/get_task_status', methods=['GET'])
+@jwt_required()
+def get_task_status():
+    user_email = get_jwt_identity()
+    user = User.query.filter_by(email=user_email).first()
+    return jsonify({"task_status": user.task_running}), 200  # Assuming task_running column
 
 if __name__ == '__main__':
     db.create_all()
